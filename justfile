@@ -1,0 +1,50 @@
+# version
+version := '2.1.0'
+
+# variables
+cc := 'g++'
+cd := 'gdb'
+ct := 'valgrind'
+c-standard := 'c++17'
+c-common-flags := '-std=' + c-standard + ' -pedantic -W -Wall -Wextra -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE'
+c-release-flags := c-common-flags + ' -Werror -O2 ' + c-extra-flags
+c-debug-flags := c-common-flags + ' -O1 -g ' + c-extra-flags
+c-extra-flags := ''
+
+# rules
+os-build-dir := './build/' + os()
+project-name := 'password_manager'
+
+_validate mode:
+    @ if [ '{{ mode }}' != 'debug' ] && [ '{{ mode }}' != 'release' ]; then echo '`mode` must be: `debug` or `release`, not `{{ mode }}`'; exit 1; fi
+
+# build project (mode must be: debug or release)
+build mode:
+    just _validate {{mode}}
+    mkdir -p "{{os-build-dir}}/{{project-name}}"
+    just _build_{{mode}}
+
+_build_debug:
+    {{cc}} {{c-debug-flags}} src/*.cpp -o "{{os-build-dir}}/{{project-name}}/debug"
+
+_build_release:
+    {{cc}} {{c-release-flags}} src/*.cpp -o "{{os-build-dir}}/{{project-name}}/release"
+
+# execute project's binary (mode must be: debug or release)
+run mode *args:  # Звездочка вместо плюса делает args опциональными
+    just build {{mode}}
+    "{{os-build-dir}}/{{project-name}}/{{mode}}" {{args}}
+
+# start debugger
+debug:
+    just build debug
+    {{cd}} "{{os-build-dir}}/{{project-name}}/debug"
+
+# clean project's build directory
+clean:
+    rm -rf "{{os-build-dir}}"
+
+# run a memory error detector valgrind
+test mode *args:
+    just build {{mode}}
+    {{ct}} --leak-check=full --show-leak-kinds=all --track-origins=yes "{{os-build-dir}}/{{project-name}}/{{mode}}" {{args}}
