@@ -14,6 +14,7 @@ c-extra-flags := ''
 # rules
 os-build-dir := './build/' + os()
 project-name := 'password_manager'
+output-file := os-build-dir + '/' + project-name + '/main'
 
 _validate mode:
     @ if [ '{{ mode }}' != 'debug' ] && [ '{{ mode }}' != 'release' ]; then echo '`mode` must be: `debug` or `release`, not `{{ mode }}`'; exit 1; fi
@@ -25,20 +26,20 @@ build mode:
     just _build_{{mode}}
 
 _build_debug:
-    {{cc}} {{c-debug-flags}} src/cpp/menu.cpp src/cpp/pass_gen.cpp src/cpp/crypto.cpp src/cpp/exceptions.cpp src/cpp/database.cpp src/cpp/totp.cpp src/cpp/mmap_utils.cpp src/cpp/import_export.cpp -o "{{os-build-dir}}/{{project-name}}/debug" -L/usr/lib64 -lssl -lcrypto -ldl -lsqlite3 -loath -ljsoncpp
+    {{cc}} {{c-debug-flags}} src/cpp/menu.cpp src/cpp/pass_gen.cpp src/cpp/crypto.cpp src/cpp/exceptions.cpp src/cpp/database.cpp src/cpp/totp.cpp src/cpp/mmap_utils.cpp src/cpp/import_export.cpp -o "{{output-file}}-debug" -L/usr/lib64 -lssl -lcrypto -ldl -lsqlite3 -loath -ljsoncpp
 
 _build_release:
-    {{cc}} {{c-release-flags}} src/cpp/menu.cpp src/cpp/pass_gen.cpp src/cpp/crypto.cpp src/cpp/exceptions.cpp src/cpp/database.cpp src/cpp/totp.cpp src/cpp/mmap_utils.cpp src/cpp/import_export.cpp -o "{{os-build-dir}}/{{project-name}}/release" -L/usr/lib64 -lssl -lcrypto -ldl -lsqlite3 -loath -ljsoncpp
+    {{cc}} {{c-release-flags}} src/cpp/menu.cpp src/cpp/pass_gen.cpp src/cpp/crypto.cpp src/cpp/exceptions.cpp src/cpp/database.cpp src/cpp/totp.cpp src/cpp/mmap_utils.cpp src/cpp/import_export.cpp -o "{{output-file}}-release" -L/usr/lib64 -lssl -lcrypto -ldl -lsqlite3 -loath -ljsoncpp
 
 # execute project's binary (mode must be: debug or release)
 run mode *args:
     just build {{mode}}
-    "{{os-build-dir}}/{{project-name}}/{{mode}}" {{args}}
+    "{{output-file}}-{{mode}}" {{args}}
 
 # start debugger
 debug:
     just build debug
-    {{cd}} "{{os-build-dir}}/{{project-name}}/debug"
+    {{cd}} "{{output-file}}-debug"
 
 # clean project's build directory
 clean:
@@ -47,4 +48,4 @@ clean:
 # run a memory error detector valgrind
 test mode *args:
     just build {{mode}}
-    {{ct}} --leak-check=full --show-leak-kinds=all --track-origins=yes "{{os-build-dir}}/{{project-name}}/{{mode}}" {{args}}
+    {{ct}} --leak-check=full --show-leak-kinds=all --track-origins=yes "{{output-file}}-{{mode}}" {{args}}

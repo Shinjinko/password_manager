@@ -30,9 +30,13 @@ std::string TOTP::generateSecret() {
 }
 
 bool TOTP::verifyCode(const std::string& secret, const std::string& code) {
-    // Проверяем формат секрета и кода
     if (secret.empty() || code.empty()) {
-        std::cerr << "TOTP: Пустой секрет или код" << std::endl;
+        std::cerr << "TOTP: Empty secret or code" << std::endl;
+        return false;
+    }
+
+    if (code.length() != 6) {
+        std::cerr << "TOTP: Invalid code length (must be 6 digits)" << std::endl;
         return false;
     }
 
@@ -41,7 +45,7 @@ bool TOTP::verifyCode(const std::string& secret, const std::string& code) {
     size_t decoded_len = 0;
     int rc = oath_base32_decode(secret.c_str(), secret.length(), &decoded_secret, &decoded_len);
     if (rc != OATH_OK || decoded_secret == nullptr) {
-        std::cerr << "TOTP: Ошибка декодирования секрета, rc=" << rc << std::endl;
+        std::cerr << "TOTP: Secret decoding failed, rc=" << rc << std::endl;
         if (decoded_secret) free(decoded_secret);
         return false;
     }
@@ -53,14 +57,14 @@ bool TOTP::verifyCode(const std::string& secret, const std::string& code) {
     free(decoded_secret);
 
     if (rc != OATH_OK) {
-        std::cerr << "TOTP: Ошибка генерации кода, rc=" << rc << std::endl;
+        std::cerr << "TOTP: Code generation failed, rc=" << rc << std::endl;
         return false;
     }
 
     // Сравниваем коды
     bool match = (code == totp_code);
     if (!match) {
-        std::cerr << "TOTP: Код не совпадает." << std::endl;
+        std::cerr << "TOTP: Code mismatch. Expected: " << totp_code << ", Got: " << code << std::endl;
     }
 
     return match;
