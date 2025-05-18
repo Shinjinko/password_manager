@@ -1,0 +1,1268 @@
+#include "../h/crypto.h"
+#include "../h/mmap_utils.h"
+#include <openssl/evp.h>
+#include <openssl/sha.h>
+#include <openssl/rand.h>
+#include <sys/stat.h>
+#include <stdexcept>
+#include <cstring>
+#include <vector>
+
+Crypto::Crypto(const std::string& password, const std::string& key_file) {
+    // Проверяем, существует ли мастер-ключ
+    bool key_exists = false;
+    struct stat st;
+    if (stat(key_file.c_str(), &st) != -1) {
+        key_exists = true;
+    }
+
+    if (key_exists) {
+        master_key = MMAPUtils::loadMasterKey(key_file, password);
+    } else {
+        // Генерируем новый мастер-ключ
+        unsigned char key[32];
+        if (RAND_bytes(key, 32) != 1) {
+            throw std::runtime_error("Failed to generate master key");
+        }
+        master_key = std::string((char*)key, 32);
+        MMAPUtils::storeMasterKey(key_file, master_key, password);
+    }
+}
+
+Crypto::~Crypto() {
+    // Очищаем мастер-ключ из памяти
+    if (!master_key.empty()) {
+        OPENSSL_cleanse(&master_key[0], master_key.size());
+    }
+}
+
+std::string Crypto::encrypt(const std::string& data) {
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) throw std::runtime_error("Failed to create cipher context");
+
+    unsigned char iv[12];
+    if (RAND_bytes(iv, 12) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        throw std::runtime_error("Failed to generate IV");
+    }
+
+    if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1 ||
+        EVP_EncryptInit_ex(ctx, nullptr, nullptr, (unsigned char*)master_key.c_str(), iv) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        throw std::runtime_error("Failed to initialize AES-256-GCM");
+    }
+
+    std::vector<unsigned char> ciphertext(data.size() + 16);
+    int len, ciphertext_len;
+
+    if (EVP_EncryptUpdate(ctx, ciphertext.data(), &len, (unsigned char*)data.c_str(), data.size()) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        throw std::runtime_error("Failed to encrypt data");
+    }
+    ciphertext_len = len;
+
+    if (EVP_EncryptFinal_ex(ctx, ciphertext.data() + len, &len) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        throw std::runtime_error("Failed to finalize encryption");
+    }
+    ciphertext_len += len;
+
+    unsigned char tag[16];
+    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, 16, tag) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        throw std::runtime_error("Failed to get GCM tag");
+    }
+
+    EVP_CIPHER_CTX_free(ctx);
+
+    // Формат: IV (12) + шифрованный текст + тег (16)
+    std::string result(12 + ciphertext_len + 16, 0);
+    memcpy(&result[0], iv, 12);
+    memcpy(&result[12], ciphertext.data(), ciphertext_len);
+    memcpy(&result[12 + ciphertext_len], tag, 16);
+
+    return result;
+}
+
+std::string Crypto::decrypt(const std::string& data) {
+    if (data.size() < 12 + 16) throw std::runtime_error("Invalid encrypted data size");
+
+    unsigned char iv[12];
+    memcpy(iv, data.c_str(), 12);
+    size_t ciphertext_len = data.size() - 12 - 16;
+    std::vector<unsigned char> ciphertext(ciphertext_len);
+    memcpy(ciphertext.data(), data.c_str() + 12, ciphertext_len);
+    unsigned char tag[16];
+    memcpy(tag, data.c_str() + 12 + ciphertext_len, 16);
+
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) throw std::runtime_error("Failed to create cipher context");
+
+    if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1 ||
+        EVP_DecryptInit_ex(ctx, nullptr, nullptr, (unsigned char*)master_key.c_str(), iv) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        throw std::runtime_error("Failed to initialize AES-256-GCM");
+    }
+
+    std::vector<unsigned char> plaintext(ciphertext_len);
+    int len, plaintext_len;
+
+    if (EVP_DecryptUpdate(ctx, plaintext.data(), &len, ciphertext.data(), ciphertext_len) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        throw std::runtime_error("Failed to decrypt data");
+    }
+    plaintext_len = len;
+
+    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, 16, tag) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        throw std::runtime_error("Failed to set GCM tag");
+    }
+
+    if (EVP_DecryptFinal_ex(ctx, plaintext.data() + len, &len) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        throw std::runtime_error("Failed to finalize decryption");
+    }
+    plaintext_len += len;
+
+    EVP_CIPHER_CTX_free(ctx);
+    return std::string(plaintext.begin(), plaintext.begin() + plaintext_len);
+}
+
+std::string Crypto::hashPassword(const std::string& password) {
+    unsigned char hash[SHA256_DIGEST_LENGTH];
+    SHA256((unsigned char*)password.c_str(), password.length(), hash);
+    char hex[2 * SHA256_DIGEST_LENGTH + 1];
+    for (int i = 0; i < SHA256_DIGEST_LENGTH; ++i) {
+        sprintf(hex + 2 * i, "%02x", hash[i]);
+    }
+    hex[2 * SHA256_DIGEST_LENGTH] = '\0';
+    return std::string(hex);
+}
+#include "../h/database.h"
+#include <iostream>
+
+Database::Database(const std::string& path) : db_path(path), db(nullptr) {
+    int rc = sqlite3_open(db_path.c_str(), &db);
+    if (rc != SQLITE_OK) {
+        std::cerr << "Ошибка открытия базы данных: " << sqlite3_errmsg(db) << std::endl;
+        sqlite3_close(db);
+        db = nullptr;
+    }
+}
+
+Database::~Database() {
+    if (db) {
+        sqlite3_close(db);
+    }
+}
+
+bool Database::initialize() {
+    if (!db) return false;
+
+    const char* create_users_sql = 
+        "CREATE TABLE IF NOT EXISTS users ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "username TEXT NOT NULL UNIQUE,"
+        "password_hash TEXT NOT NULL,"
+        "totp_secret TEXT NOT NULL);";
+
+    const char* create_passwords_sql = 
+        "CREATE TABLE IF NOT EXISTS passwords ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "user_id INTEGER NOT NULL,"
+        "description TEXT NOT NULL,"
+        "login TEXT NOT NULL,"
+        "password BLOB NOT NULL,"
+        "FOREIGN KEY (user_id) REFERENCES users (id));";
+
+    char* err_msg = nullptr;
+    int rc = sqlite3_exec(db, create_users_sql, nullptr, nullptr, &err_msg);
+    if (rc != SQLITE_OK) {
+        std::cerr << "Ошибка создания таблицы users: " << err_msg << std::endl;
+        sqlite3_free(err_msg);
+        return false;
+    }
+
+    rc = sqlite3_exec(db, create_passwords_sql, nullptr, nullptr, &err_msg);
+    if (rc != SQLITE_OK) {
+        std::cerr << "Ошибка создания таблицы passwords: " << err_msg << std::endl;
+        sqlite3_free(err_msg);
+        return false;
+    }
+
+    return true;
+}
+
+bool Database::registerUser(const std::string& username, const std::string& password_hash, const std::string& totp_secret) {
+    if (!db) return false;
+
+    const char* sql = "INSERT INTO users (username, password_hash, totp_secret) VALUES (?, ?, ?);";
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        std::cerr << "Ошибка подготовки запроса: " << sqlite3_errmsg(db) << std::endl;
+        return false;
+    }
+
+    sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, password_hash.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, totp_secret.c_str(), -1, SQLITE_STATIC);
+
+    rc = sqlite3_step(stmt);
+    bool success = (rc == SQLITE_DONE);
+    if (!success) {
+        std::cerr << "Ошибка регистрации: " << sqlite3_errmsg(db) << std::endl;
+    }
+
+    sqlite3_finalize(stmt);
+    return success;
+}
+
+bool Database::authenticateUser(const std::string& username, const std::string& password_hash, int& user_id, std::string& totp_secret) {
+    if (!db) return false;
+
+    const char* sql = "SELECT id, totp_secret FROM users WHERE username = ? AND password_hash = ?;";
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        std::cerr << "Ошибка подготовки запроса: " << sqlite3_errmsg(db) << std::endl;
+        return false;
+    }
+
+    sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, password_hash.c_str(), -1, SQLITE_STATIC);
+
+    rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
+        user_id = sqlite3_column_int(stmt, 0);
+        totp_secret = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        sqlite3_finalize(stmt);
+        return true;
+    }
+
+    sqlite3_finalize(stmt);
+    return false;
+}
+
+bool Database::addPassword(int user_id, const PasswordEntry& entry) {
+    if (!db) return false;
+
+    const char* sql = "INSERT INTO passwords (user_id, description, login, password) VALUES (?, ?, ?, ?);";
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        std::cerr << "Ошибка подготовки запроса: " << sqlite3_errmsg(db) << std::endl;
+        return false;
+    }
+
+    sqlite3_bind_int(stmt, 1, user_id);
+    sqlite3_bind_text(stmt, 2, entry.description.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, entry.login.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_blob(stmt, 4, entry.password.data(), entry.password.size(), SQLITE_STATIC);
+
+    rc = sqlite3_step(stmt);
+    bool success = (rc == SQLITE_DONE);
+    if (!success) {
+        std::cerr << "Ошибка добавления записи: " << sqlite3_errmsg(db) << std::endl;
+    }
+
+    sqlite3_finalize(stmt);
+    return success;
+}
+
+bool Database::removePassword(int user_id, const std::string& description) {
+    if (!db) return false;
+
+    const char* sql = "DELETE FROM passwords WHERE user_id = ? AND description = ?;";
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        std::cerr << "Ошибка подготовки запроса: " << sqlite3_errmsg(db) << std::endl;
+        return false;
+    }
+
+    sqlite3_bind_int(stmt, 1, user_id);
+    sqlite3_bind_text(stmt, 2, description.c_str(), -1, SQLITE_STATIC);
+
+    rc = sqlite3_step(stmt);
+    bool success = (rc == SQLITE_DONE && sqlite3_changes(db) > 0);
+    if (!success && sqlite3_changes(db) == 0) {
+        std::cerr << "Запись не найдена!" << std::endl;
+    }
+
+    sqlite3_finalize(stmt);
+    return success;
+}
+
+bool Database::getPasswords(int user_id, std::vector<PasswordEntry>& entries) {
+    if (!db) return false;
+
+    entries.clear();
+    const char* sql = "SELECT description, login, password FROM passwords WHERE user_id = ?;";
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        std::cerr << "Ошибка подготовки запроса: " << sqlite3_errmsg(db) << std::endl;
+        return false;
+    }
+
+    sqlite3_bind_int(stmt, 1, user_id);
+
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        PasswordEntry entry;
+        entry.description = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        entry.login = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        const void* blob = sqlite3_column_blob(stmt, 2);
+        int blob_size = sqlite3_column_bytes(stmt, 2);
+        entry.password = std::string(static_cast<const char*>(blob), blob_size);
+        entries.push_back(entry);
+    }
+
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_DONE || !entries.empty();
+}#include "../h/exceptions.h"
+#include <iostream>
+#include <limits>
+
+namespace Exceptions {
+    int getValidNumber(int min, int max, const std::string& prompt) {
+        int number;
+        while (true) {
+            std::cout << prompt;
+            if (std::cin >> number) {
+                if (number >= min && number <= max) {
+                    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n'); // Очистка буфера
+                    return number;
+                } else {
+                    std::cout << "Ошибка: введите число от " << min << " до " << max << "!" << std::endl;
+                }
+            } else {
+                std::cout << "Ошибка: введите число!" << std::endl;
+                std::cin.clear();
+                std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+            }
+        }
+    }
+}#include "../h/import_export.h"
+#include "../h/mmap_utils.h"
+#include <json/json.h>
+#include <stdexcept>
+
+// Экспортирует пароли в JSON-файл через mmap
+// TODO: Добавить шифрование JSON с использованием master_key
+void ImportExport::exportPasswords(const std::string& buffer_file, const std::vector<PasswordEntry>& entries) {
+    Json::Value root(Json::arrayValue);
+    for (const auto& entry : entries) {
+        Json::Value item;
+        item["description"] = entry.description;
+        item["login"] = entry.login;
+        item["password"] = entry.password; // Пароль уже расшифрован
+        root.append(item);
+    }
+
+    Json::StreamWriterBuilder builder;
+    std::string json_data = Json::writeString(builder, root);
+    MMAPUtils::writeImportExportBuffer(buffer_file, json_data);
+}
+
+// Импортирует пароли из JSON-файла через mmap
+// TODO: Добавить расшифровку JSON с использованием master_key
+std::vector<PasswordEntry> ImportExport::importPasswords(const std::string& buffer_file) {
+    std::string json_data = MMAPUtils::readImportExportBuffer(buffer_file);
+    Json::Value root;
+    Json::CharReaderBuilder builder;
+    std::unique_ptr<Json::CharReader> reader(builder.newCharReader());
+    std::string errors;
+
+    if (!reader->parse(json_data.c_str(), json_data.c_str() + json_data.size(), &root, &errors)) {
+        throw std::runtime_error("Failed to parse JSON: " + errors);
+    }
+
+    std::vector<PasswordEntry> entries;
+    for (const auto& item : root) {
+        PasswordEntry entry;
+        entry.description = item["description"].asString();
+        entry.login = item["login"].asString();
+        entry.password = item["password"].asString(); // Будет зашифрован при добавлении
+        entries.push_back(entry);
+    }
+
+    return entries;
+}
+#include "../h/tui.h"
+#include <stdexcept>
+#include <iostream>
+#include <ostream>
+
+int main() {
+    try {
+        TUI tui("passwords.db", "master_key.bin", "totp_cache.bin");
+        tui.run();
+    } catch (const std::exception& e) {
+        endwin();
+        std::cerr << "Fatal error: " << e.what() << std::endl;
+        return 1;
+    }
+    return 0;
+}#include <iostream>
+#include <string>
+#include <vector>
+#include <cstdlib>
+#include <ctime>
+#include <limits>
+#include "../h/pass_gen.h"
+#include "../h/crypto.h"
+#include "../h/exceptions.h"
+#include "../h/database.h"
+#include "../h/totp.h"
+#include "../h/mmap_utils.h"
+#include "../h/import_export.h"
+
+void showAuthMenu() {
+    std::cout << "\nМенеджер паролей CLI - Аутентификация" << std::endl;
+    std::cout << "1. Войти" << std::endl;
+    std::cout << "2. Зарегистрироваться" << std::endl;
+    std::cout << "3. Выйти" << std::endl;
+}
+
+void showMainMenu() {
+    std::cout << "\nМенеджер паролей CLI" << std::endl;
+    std::cout << "1. Добавить пароль" << std::endl;
+    std::cout << "2. Удалить пароль" << std::endl;
+    std::cout << "3. Вывести список" << std::endl;
+    std::cout << "4. Экспортировать пароли" << std::endl;
+    std::cout << "5. Импортировать пароли" << std::endl;
+    std::cout << "6. Выйти" << std::endl;
+}
+
+int choosePasswordMethod() {
+    std::cout << "1. Ввести пароль вручную" << std::endl;
+    std::cout << "2. Сгенерировать пароль" << std::endl;
+    return Exceptions::getValidNumber(1, 2);
+}
+
+bool getPasswordGenerationParams(int& length, bool& useLower, bool& useUpper, bool& useDigits, bool& useSymbols) {
+    length = Exceptions::getValidNumber(1, 214, "Введите длину пароля: ");
+
+    char input;
+    std::cout << "Использовать строчные буквы? (y/n): ";
+    std::cin >> input;
+    useLower = (input == 'y' || input == 'Y');
+    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+
+    std::cout << "Использовать заглавные буквы? (y/n): ";
+    std::cin >> input;
+    useUpper = (input == 'y' || input == 'Y');
+    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+
+    std::cout << "Использовать цифры? (y/n): ";
+    std::cin >> input;
+    useDigits = (input == 'y' || input == 'Y');
+    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+
+    std::cout << "Использовать символы? (y/n): ";
+    std::cin >> input;
+    useSymbols = (input == 'y' || input == 'Y');
+    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+
+    return true;
+}
+
+bool authenticate(Database& db, Crypto& crypto, int& user_id) {
+    while (true) {
+        showAuthMenu();
+        int choice = Exceptions::getValidNumber(1, 3);
+        if (choice == 3) {
+            std::cout << "Выход..." << std::endl;
+            return false;
+        }
+
+        std::string username, password, totp_code;
+        std::cout << "Введите имя пользователя: ";
+        std::getline(std::cin, username);
+        std::cout << "Введите пароль: ";
+        std::getline(std::cin, password);
+        std::string password_hash = crypto.hashPassword(password);
+
+        if (choice == 1) { // Вход
+            std::string totp_secret;
+            if (db.authenticateUser(username, password_hash, user_id, totp_secret)) {
+                std::cout << "Введите TOTP-код: ";
+                std::getline(std::cin, totp_code);
+                if (MMAPUtils::isCodeInCache("2fa_cache.bin", user_id, totp_code)) {
+                    std::cout << "TOTP-код уже использован!" << std::endl;
+                    continue;
+                }
+                if (TOTP::verifyCode(totp_secret, totp_code)) {
+                    MMAPUtils::addTOTPCacheEntry("2fa_cache.bin", user_id, totp_code);
+                    std::cout << "Вход успешен!" << std::endl;
+                    return true;
+                } else {
+                    std::cout << "Неверный TOTP-код!" << std::endl;
+                }
+            } else {
+                std::cout << "Неверное имя пользователя или пароль!" << std::endl;
+            }
+        } else if (choice == 2) { // Регистрация
+            std::string totp_secret = TOTP::generateSecret();
+            if (db.registerUser(username, password_hash, totp_secret)) {
+                std::cout << "Регистрация успешна! Ваш TOTP секрет: " << totp_secret 
+                          << "\nСохраните его для настройки 2FA (например, в Google Authenticator)." << std::endl;
+            } else {
+                std::cout << "Ошибка регистрации: пользователь уже существует или другая ошибка." << std::endl;
+            }
+        }
+    }
+}
+
+void addPassword(Database& db, Crypto& crypto, int user_id) {
+    PasswordEntry entry;
+    std::cout << "Введите описание (сайт): ";
+    std::getline(std::cin, entry.description);
+    std::cout << "Введите логин: ";
+    std::getline(std::cin, entry.login);
+
+    int choice = choosePasswordMethod();
+
+    if (choice == 1) {
+        std::cout << "Введите пароль: ";
+        std::getline(std::cin, entry.password);
+    } else if (choice == 2) {
+        int length;
+        bool useLower, useUpper, useDigits, useSymbols;
+
+        if (!getPasswordGenerationParams(length, useLower, useUpper, useDigits, useSymbols)) {
+            return;
+        }
+
+        entry.password = generatePassword(length, useLower, useUpper, useDigits, useSymbols);
+
+        if (entry.password.empty()) {
+            std::cout << "Не удалось сгенерировать пароль!" << std::endl;
+            return;
+        }
+    }
+
+    try {
+        entry.password = crypto.encrypt(entry.password);
+    } catch (const std::exception& e) {
+        std::cout << "Ошибка шифрования: " << e.what() << std::endl;
+        return;
+    }
+
+    if (db.addPassword(user_id, entry)) {
+        std::cout << "Запись добавлена!" << std::endl;
+    } else {
+        std::cout << "Ошибка добавления записи!" << std::endl;
+    }
+}
+
+void removePassword(Database& db, int user_id) {
+    std::string description;
+    std::cout << "Введите описание (сайт) для удаления: ";
+    std::getline(std::cin, description);
+    
+    if (db.removePassword(user_id, description)) {
+        std::cout << "Запись удалена!" << std::endl;
+    }
+}
+
+void listPasswords(Database& db, Crypto& crypto, int user_id) {
+    std::vector<PasswordEntry> entries;
+    if (!db.getPasswords(user_id, entries)) {
+        std::cout << "Ошибка получения записей!" << std::endl;
+        return;
+    }
+
+    if (entries.empty()) {
+        std::cout << "Список паролей пуст." << std::endl;
+        return;
+    }
+    
+    std::cout << "Сохраненные записи:" << std::endl;
+    for (const auto& entry : entries) {
+        try {
+            std::string decrypted = crypto.decrypt(entry.password);
+            std::cout << "Сайт: " << entry.description 
+                      << " | Логин: " << entry.login 
+                      << " | Пароль: " << decrypted << std::endl;
+        } catch (const std::exception& e) {
+            std::cout << "Сайт: " << entry.description 
+                      << " | Логин: " << entry.login 
+                      << " | Ошибка расшифровки: " << e.what() << std::endl;
+        }
+    }
+}
+
+void exportPasswords(Database& db, Crypto& crypto, int user_id) {
+    std::vector<PasswordEntry> entries;
+    if (!db.getPasswords(user_id, entries)) {
+        std::cout << "Ошибка получения записей!" << std::endl;
+        return;
+    }
+
+    std::vector<PasswordEntry> decrypted_entries;
+    for (const auto& entry : entries) {
+        PasswordEntry decrypted_entry = entry;
+        try {
+            decrypted_entry.password = crypto.decrypt(entry.password);
+            decrypted_entries.push_back(decrypted_entry);
+        } catch (const std::exception& e) {
+            std::cout << "Ошибка расшифровки записи: " << entry.description << std::endl;
+        }
+    }
+
+    try {
+        ImportExport::exportPasswords("import_export.json", decrypted_entries);
+        std::cout << "Пароли экспортированы в import_export.json" << std::endl;
+    } catch (const std::exception& e) {
+        std::cout << "Ошибка экспорта: " << e.what() << std::endl;
+    }
+}
+
+void importPasswords(Database& db, Crypto& crypto, int user_id) {
+    try {
+        std::vector<PasswordEntry> entries = ImportExport::importPasswords("import_export.json");
+        for (auto& entry : entries) {
+            entry.password = crypto.encrypt(entry.password);
+            if (!db.addPassword(user_id, entry)) {
+                std::cout << "Ошибка добавления записи: " << entry.description << std::endl;
+            }
+        }
+        std::cout << "Пароли импортированы из import_export.json" << std::endl;
+    } catch (const std::exception& e) {
+        std::cout << "Ошибка импорта: " << e.what() << std::endl;
+    }
+}
+
+int main() {
+    srand(time(0));
+    Database db("password_manager.db");
+    if (!db.initialize()) {
+        std::cerr << "Ошибка инициализации базы данных!" << std::endl;
+        return 1;
+    }
+
+    // Инициализация кэша TOTP
+    try {
+        MMAPUtils::initTOTPCache("2fa_cache.bin", 1024);
+    } catch (const std::exception& e) {
+        std::cerr << "Ошибка инициализации кэша TOTP: " << e.what() << std::endl;
+        return 1;
+    }
+
+    std::string password;
+    std::cout << "Введите мастер-пароль для шифрования: ";
+    std::getline(std::cin, password);
+
+    Crypto crypto(password, "master_key.bin");
+    int user_id = -1;
+    if (!authenticate(db, crypto, user_id)) {
+        MMAPUtils::cleanupTOTPCache("2fa_cache.bin");
+        return 0;
+    }
+
+    while (true) {
+        showMainMenu();
+        int choice = Exceptions::getValidNumber(1, 6);
+        switch (choice) {
+            case 1:
+                addPassword(db, crypto, user_id);
+                break;
+            case 2:
+                removePassword(db, user_id);
+                break;
+            case 3:
+                listPasswords(db, crypto, user_id);
+                break;
+            case 4:
+                exportPasswords(db, crypto, user_id);
+                break;
+            case 5:
+                importPasswords(db, crypto, user_id);
+                break;
+            case 6:
+                std::cout << "Выход..." << std::endl;
+                MMAPUtils::cleanupTOTPCache("2fa_cache.bin");
+                return 0;
+        }
+    }
+    return 0;
+}#include "../h/mmap_utils.h"
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <stdexcept>
+#include <cstring>
+#include <openssl/evp.h>
+#include <openssl/rand.h>
+#include <openssl/sha.h>
+#include <iostream>
+
+void MMAPUtils::initTOTPCache(const std::string& cache_file, size_t max_entries) {
+    int fd = open(cache_file.c_str(), O_RDWR | O_CREAT, 0600);
+    if (fd == -1) throw std::runtime_error("Failed to open TOTP cache file");
+
+    size_t size = max_entries * sizeof(TOTPCacheEntry);
+    if (ftruncate(fd, size) == -1) {
+        close(fd);
+        throw std::runtime_error("Failed to set TOTP cache file size");
+    }
+
+    void* addr = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (addr == MAP_FAILED) {
+        close(fd);
+        throw std::runtime_error("Failed to mmap TOTP cache");
+    }
+
+    memset(addr, 0, size); // Очищаем кэш
+    munmap(addr, size);
+    close(fd);
+}
+
+bool MMAPUtils::addTOTPCacheEntry(const std::string& cache_file, int user_id, const std::string& code) {
+    struct stat st;
+    if (stat(cache_file.c_str(), &st) == -1) return false;
+
+    int fd = open(cache_file.c_str(), O_RDWR);
+    if (fd == -1) return false;
+
+    size_t size = st.st_size;
+    TOTPCacheEntry* entries = (TOTPCacheEntry*)mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (entries == MAP_FAILED) {
+        close(fd);
+        return false;
+    }
+
+    size_t max_entries = size / sizeof(TOTPCacheEntry);
+    for (size_t i = 0; i < max_entries; ++i) {
+        if (entries[i].user_id == 0) { // Пустая запись
+            entries[i].user_id = user_id;
+            strncpy(entries[i].code, code.c_str(), 7);
+            entries[i].timestamp = time(nullptr);
+            munmap(entries, size);
+            close(fd);
+            return true;
+        }
+    }
+
+    munmap(entries, size);
+    close(fd);
+    return false;
+}
+
+bool MMAPUtils::isCodeInCache(const std::string& cache_file, int user_id, const std::string& code) {
+    struct stat st;
+    if (stat(cache_file.c_str(), &st) == -1) return false;
+
+    int fd = open(cache_file.c_str(), O_RDONLY);
+    if (fd == -1) return false;
+
+    size_t size = st.st_size;
+    TOTPCacheEntry* entries = (TOTPCacheEntry*)mmap(nullptr, size, PROT_READ, MAP_SHARED, fd, 0);
+    if (entries == MAP_FAILED) {
+        close(fd);
+        return false;
+    }
+
+    size_t max_entries = size / sizeof(TOTPCacheEntry);
+    time_t now = time(nullptr);
+    bool found = false;
+    for (size_t i = 0; i < max_entries; ++i) {
+        if (entries[i].user_id == user_id && strcmp(entries[i].code, code.c_str()) == 0) {
+            if (now - entries[i].timestamp < 30) {
+                found = true;
+            } else {
+                entries[i].user_id = 0; // Очищаем устаревшую запись
+            }
+        }
+    }
+
+    munmap(entries, size);
+    close(fd);
+    return found;
+}
+
+void MMAPUtils::cleanupTOTPCache(const std::string& cache_file) {
+    struct stat st;
+    if (stat(cache_file.c_str(), &st) == -1) return;
+
+    int fd = open(cache_file.c_str(), O_RDWR);
+    if (fd == -1) return;
+
+    size_t size = st.st_size;
+    TOTPCacheEntry* entries = (TOTPCacheEntry*)mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (entries == MAP_FAILED) {
+        close(fd);
+        return;
+    }
+
+    size_t max_entries = size / sizeof(TOTPCacheEntry);
+    time_t now = time(nullptr);
+    for (size_t i = 0; i < max_entries; ++i) {
+        if (entries[i].user_id != 0 && now - entries[i].timestamp >= 30) {
+            entries[i].user_id = 0;
+        }
+    }
+
+    munmap(entries, size);
+    close(fd);
+}
+
+void MMAPUtils::writeImportExportBuffer(const std::string& buffer_file, const std::string& data) {
+    int fd = open(buffer_file.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (fd == -1) throw std::runtime_error("Failed to open import/export buffer file");
+
+    size_t size = data.size();
+    if (ftruncate(fd, size) == -1) {
+        close(fd);
+        throw std::runtime_error("Failed to set import/export buffer file size");
+    }
+
+    char* addr = (char*)mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (addr == MAP_FAILED) {
+        close(fd);
+        throw std::runtime_error("Failed to mmap import/export buffer");
+    }
+
+    memcpy(addr, data.data(), size);
+    munmap(addr, size);
+    close(fd);
+}
+
+std::string MMAPUtils::readImportExportBuffer(const std::string& buffer_file) {
+    struct stat st;
+    if (stat(buffer_file.c_str(), &st) == -1) {
+        throw std::runtime_error("Import/export buffer file does not exist");
+    }
+
+    int fd = open(buffer_file.c_str(), O_RDONLY);
+    if (fd == -1) throw std::runtime_error("Failed to open import/export buffer file");
+
+    size_t size = st.st_size;
+    char* addr = (char*)mmap(nullptr, size, PROT_READ, MAP_SHARED, fd, 0);
+    if (addr == MAP_FAILED) {
+        close(fd);
+        throw std::runtime_error("Failed to mmap import/export buffer");
+    }
+
+    std::string result(addr, size);
+    munmap(addr, size);
+    close(fd);
+    return result;
+}
+
+void MMAPUtils::storeMasterKey(const std::string& key_file, const std::string& key, const std::string& encryption_key) {
+    // Генерируем ключ шифрования для мастер-ключа
+    unsigned char derived_key[32];
+    if (!PKCS5_PBKDF2_HMAC(encryption_key.c_str(), encryption_key.length(), 
+                           nullptr, 0, 10000, EVP_sha256(), 32, derived_key)) {
+        throw std::runtime_error("Failed to derive encryption key for master key");
+    }
+
+    // Инициализация AES-256-GCM
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) throw std::runtime_error("Failed to create cipher context");
+
+    unsigned char iv[12];
+    if (RAND_bytes(iv, 12) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        throw std::runtime_error("Failed to generate IV");
+    }
+
+    if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1 ||
+        EVP_EncryptInit_ex(ctx, nullptr, nullptr, derived_key, iv) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        throw std::runtime_error("Failed to initialize AES-256-GCM");
+    }
+
+    std::vector<unsigned char> ciphertext(key.size() + 16);
+    int len, ciphertext_len;
+
+    if (EVP_EncryptUpdate(ctx, ciphertext.data(), &len, (unsigned char*)key.c_str(), key.size()) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        throw std::runtime_error("Failed to encrypt master key");
+    }
+    ciphertext_len = len;
+
+    if (EVP_EncryptFinal_ex(ctx, ciphertext.data() + len, &len) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        throw std::runtime_error("Failed to finalize master key encryption");
+    }
+    ciphertext_len += len;
+
+    unsigned char tag[16];
+    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, 16, tag) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        throw std::runtime_error("Failed to get GCM tag");
+    }
+
+    EVP_CIPHER_CTX_free(ctx);
+
+    // Сохраняем IV + шифрованный ключ + тег в файл через mmap
+    size_t total_size = 12 + ciphertext_len + 16;
+    int fd = open(key_file.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (fd == -1) throw std::runtime_error("Failed to open master key file");
+
+    if (ftruncate(fd, total_size) == -1) {
+        close(fd);
+        throw std::runtime_error("Failed to set master key file size");
+    }
+
+    unsigned char* addr = (unsigned char*)mmap(nullptr, total_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (addr == MAP_FAILED) {
+        close(fd);
+        throw std::runtime_error("Failed to mmap master key");
+    }
+
+    memcpy(addr, iv, 12);
+    memcpy(addr + 12, ciphertext.data(), ciphertext_len);
+    memcpy(addr + 12 + ciphertext_len, tag, 16);
+
+    munmap(addr, total_size);
+    close(fd);
+}
+
+std::string MMAPUtils::loadMasterKey(const std::string& key_file, const std::string& encryption_key) {
+    struct stat st;
+    if (stat(key_file.c_str(), &st) == -1) {
+        throw std::runtime_error("Master key file does not exist");
+    }
+
+    if (st.st_size < 12 + 16) {
+        throw std::runtime_error("Master key file is too small");
+    }
+
+    int fd = open(key_file.c_str(), O_RDONLY);
+    if (fd == -1) throw std::runtime_error("Failed to open master key file");
+
+    size_t size = st.st_size;
+    unsigned char* addr = (unsigned char*)mmap(nullptr, size, PROT_READ, MAP_SHARED, fd, 0);
+    if (addr == MAP_FAILED) {
+        close(fd);
+        throw std::runtime_error("Failed to mmap master key");
+    }
+
+    unsigned char iv[12];
+    memcpy(iv, addr, 12);
+    size_t ciphertext_len = size - 12 - 16;
+    std::vector<unsigned char> ciphertext(ciphertext_len);
+    memcpy(ciphertext.data(), addr + 12, ciphertext_len);
+    unsigned char tag[16];
+    memcpy(tag, addr + 12 + ciphertext_len, 16);
+
+    munmap(addr, size);
+    close(fd);
+
+    // Генерируем ключ расшифровки
+    unsigned char derived_key[32];
+    if (!PKCS5_PBKDF2_HMAC(encryption_key.c_str(), encryption_key.length(), 
+                           nullptr, 0, 10000, EVP_sha256(), 32, derived_key)) {
+        throw std::runtime_error("Failed to derive decryption key for master key");
+    }
+
+    // Инициализация AES-256-GCM
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) throw std::runtime_error("Failed to create cipher context");
+
+    if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1 ||
+        EVP_DecryptInit_ex(ctx, nullptr, nullptr, derived_key, iv) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        throw std::runtime_error("Failed to initialize AES-256-GCM");
+    }
+
+    std::vector<unsigned char> plaintext(ciphertext_len);
+    int len, plaintext_len;
+
+    if (EVP_DecryptUpdate(ctx, plaintext.data(), &len, ciphertext.data(), ciphertext_len) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        throw std::runtime_error("Failed to decrypt master key");
+    }
+    plaintext_len = len;
+
+    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, 16, tag) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        throw std::runtime_error("Failed to set GCM tag");
+    }
+
+    if (EVP_DecryptFinal_ex(ctx, plaintext.data() + len, &len) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        throw std::runtime_error("Failed to finalize master key decryption");
+    }
+    plaintext_len += len;
+
+    EVP_CIPHER_CTX_free(ctx);
+    return std::string(plaintext.begin(), plaintext.begin() + plaintext_len);
+}#include "../h/pass_gen.h"
+#include <cstdlib>
+
+std::string generatePassword(int length, bool useLower, bool useUpper, bool useDigits, bool useSymbols) {
+    std::string chars;
+    if (useLower) chars += "abcdefghijklmnopqrstuvwxyz";
+    if (useUpper) chars += "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    if (useDigits) chars += "0123456789";
+    if (useSymbols) chars += "!@#$%^&*()_+-=[]{}|;:,.<>?";
+
+    if (chars.empty()) {
+        return "";
+    }
+
+    std::string password;
+    for (int i = 0; i < length; ++i) {
+        password += chars[rand() % chars.length()];
+    }
+    return password;
+}
+#include "../h/totp.h"
+#include <liboath/oath.h>
+#include <stdexcept>
+#include <random>
+#include <ctime>
+#include <iostream>
+
+std::string TOTP::generateSecret() {
+    const char* alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dis(0, 31);
+
+    char secret[17];
+    for (int i = 0; i < 16; ++i) {
+        secret[i] = alphabet[dis(gen)];
+    }
+    secret[16] = '\0';
+
+    char* encoded = nullptr;
+    size_t encoded_len = 0;
+    if (oath_base32_encode(secret, 16, &encoded, &encoded_len) != OATH_OK) {
+        if (encoded) free(encoded);
+        throw std::runtime_error("Failed to encode TOTP secret");
+    }
+
+    std::string result(encoded, encoded_len);
+    free(encoded);
+    return result;
+}
+
+bool TOTP::verifyCode(const std::string& secret, const std::string& code) {
+    if (secret.empty() || code.empty()) {
+        std::cerr << "TOTP: Empty secret or code" << std::endl;
+        return false;
+    }
+
+    if (code.length() != 6) {
+        std::cerr << "TOTP: Invalid code length (must be 6 digits)" << std::endl;
+        return false;
+    }
+
+    // Декодируем Base32 секрет
+    char* decoded_secret = nullptr;
+    size_t decoded_len = 0;
+    int rc = oath_base32_decode(secret.c_str(), secret.length(), &decoded_secret, &decoded_len);
+    if (rc != OATH_OK || decoded_secret == nullptr) {
+        std::cerr << "TOTP: Secret decoding failed, rc=" << rc << std::endl;
+        if (decoded_secret) free(decoded_secret);
+        return false;
+    }
+
+    // Генерируем TOTP-код
+    time_t now = time(nullptr);
+    char totp_code[7];
+    rc = oath_totp_generate(decoded_secret, decoded_len, now, 30, 0, 6, totp_code);
+    free(decoded_secret);
+
+    if (rc != OATH_OK) {
+        std::cerr << "TOTP: Code generation failed, rc=" << rc << std::endl;
+        return false;
+    }
+
+    // Сравниваем коды
+    bool match = (code == totp_code);
+    if (!match) {
+        std::cerr << "TOTP: Code mismatch. Expected: " << totp_code << ", Got: " << code << std::endl;
+    }
+
+    return match;
+}#include "../h/tui.h"
+#include "../h/mmap_utils.h"
+#include <stdexcept>
+#include <sstream>
+#include <iostream>
+#include <locale.h>
+#include <wchar.h>
+
+TUI::TUI(const std::string& db_path, const std::string& key_file, const std::string& cache_file)
+    : db(new Database(db_path)), key_file(key_file), cache_file(cache_file),
+      current_user_id(0), is_authenticated(false), main_win(nullptr), input_win(nullptr), status_win(nullptr) {
+    // Установка локали для поддержки UTF-8
+    setlocale(LC_ALL, "");
+
+    // Инициализация ncurses
+    initscr();
+    cbreak();
+    noecho();
+    keypad(stdscr, TRUE);
+    curs_set(0); // Hide cursor
+
+    // Initialize colors
+    initColors();
+
+    // Создание окон
+    int max_y, max_x;
+    getmaxyx(stdscr, max_y, max_x);
+    main_win = newwin(max_y - 5, max_x, 0, 0);
+    input_win = newwin(3, max_x, max_y - 5, 0);
+    status_win = newwin(2, max_x, max_y - 2, 0);
+    
+    // Enable keypad for windows
+    keypad(main_win, TRUE);
+    keypad(input_win, TRUE);
+    keypad(status_win, TRUE);
+    
+    refreshWindows();
+    
+    // Инициализация базы данных
+    if (!db->initialize()) {
+        showError("Не удалось инициализировать базу данных");
+        throw std::runtime_error("Database initialization failed");
+    }
+
+    // Инициализация кэша TOTP
+    MMAPUtils::initTOTPCache(cache_file, 100);
+}
+
+void TUI::initColors() {
+    if (has_colors()) {
+        start_color();
+        init_pair(PAIR_DEFAULT, COLOR_WHITE, COLOR_BLACK);
+        init_pair(PAIR_TITLE, COLOR_CYAN, COLOR_BLACK);
+        init_pair(PAIR_MENU, COLOR_YELLOW, COLOR_BLACK);
+        init_pair(PAIR_SUCCESS, COLOR_GREEN, COLOR_BLACK);
+        init_pair(PAIR_ERROR, COLOR_RED, COLOR_BLACK);
+        init_pair(PAIR_WARNING, COLOR_MAGENTA, COLOR_BLACK);
+        init_pair(PAIR_HIGHLIGHT, COLOR_BLUE, COLOR_BLACK);
+    }
+}
+
+void TUI::centerText(WINDOW* win, int y, const std::wstring& text, int pair) {
+    int max_x = getmaxx(win);
+    int x = (max_x - text.length()) / 2;
+    if (x < 0) x = 0;
+    wattron(win, COLOR_PAIR(pair));
+    mvwaddwstr(win, y, x, text.c_str());
+    wattroff(win, COLOR_PAIR(pair));
+}
+
+void TUI::centerText(WINDOW* win, int y, const std::string& text, int pair) {
+    centerText(win, y, std::wstring(text.begin(), text.end()), pair);
+}
+
+void TUI::showMainMenu() {
+    wclear(main_win);
+    box(main_win, 0, 0);
+    
+    centerText(main_win, 1, L"Менеджер паролей", PAIR_TITLE);
+    centerText(main_win, 3, L"1. Регистрация", PAIR_MENU);
+    centerText(main_win, 4, L"2. Вход", PAIR_MENU);
+    centerText(main_win, 5, L"3. Выход", PAIR_MENU);
+    
+    wrefresh(main_win);
+    
+    int choice = getValidNumber(1, 3, "Выберите опцию: ");
+    switch (choice) {
+        case 1: handleRegister(); break;
+        case 2: handleLogin(); break;
+        case 3: exit(0);
+    }
+}
+
+void TUI::showAuthenticatedMenu() {
+    wclear(main_win);
+    box(main_win, 0, 0);
+    
+    std::wstring welcome = L"Добро пожаловать, " + std::wstring(current_username.begin(), current_username.end());
+    centerText(main_win, 1, welcome, PAIR_TITLE);
+    
+    centerText(main_win, 3, L"1. Добавить пароль", PAIR_MENU);
+    centerText(main_win, 4, L"2. Удалить пароль", PAIR_MENU);
+    centerText(main_win, 5, L"3. Просмотреть пароли", PAIR_MENU);
+    centerText(main_win, 6, L"4. Сгенерировать пароль", PAIR_MENU);
+    centerText(main_win, 7, L"5. Импорт/Экспорт паролей", PAIR_MENU);
+    centerText(main_win, 8, L"6. Выход", PAIR_MENU);
+    
+    wrefresh(main_win);
+    
+    int choice = getValidNumber(1, 6, "Выберите опцию: ");
+    switch (choice) {
+        case 1: handleAddPassword(); break;
+        case 2: handleRemovePassword(); break;
+        case 3: handleViewPasswords(); break;
+        case 4: handleGeneratePassword(); break;
+        case 5: handleImportExport(); break;
+        case 6: is_authenticated = false; current_user_id = 0; current_username.clear(); delete crypto; crypto = nullptr; break;
+    }
+}
+
+void TUI::handleLogin() {
+    std::string username = getInput("Введите имя пользователя: ");
+    std::string password = getInput("Введите пароль: ");
+    std::string password_hash = Crypto("", key_file).hashPassword(password);
+    std::string totp_secret;
+    int user_id;
+    
+    if (db->authenticateUser(username, password_hash, user_id, totp_secret)) {
+        if (totp_secret.empty()) {
+            showError("Недействительный TOTP секрет в базе данных. Пожалуйста, зарегистрируйтесь заново.");
+            return;
+        }
+        
+        std::string totp_code = getInput("Введите TOTP код: ");
+        if (MMAPUtils::isCodeInCache(cache_file, user_id, totp_code)) {
+            showError("TOTP код уже использован.");
+            return;
+        }
+        
+        if (TOTP::verifyCode(totp_secret, totp_code)) {
+            MMAPUtils::addTOTPCacheEntry(cache_file, user_id, totp_code);
+            crypto = new Crypto(password, key_file);
+            current_user_id = user_id;
+            current_username = username;
+            is_authenticated = true;
+            showSuccess("Вход выполнен успешно.");
+        } else {
+            showError("Недействительный TOTP код.");
+        }
+    } else {
+        showError("Недействительное имя пользователя или пароль.");
+    }
+}
+
+void TUI::showSuccess(const std::string& message) {
+    wclear(status_win);
+    box(status_win, 0, 0);
+    std::wstring wmessage = L"✓ " + std::wstring(message.begin(), message.end());
+    centerText(status_win, 1, wmessage, PAIR_SUCCESS);
+    wrefresh(status_win);
+    wgetch(status_win);
+}
+
+void TUI::showError(const std::string& message) {
+    wclear(status_win);
+    box(status_win, 0, 0);
+    std::wstring wmessage = L"✗ " + std::wstring(message.begin(), message.end());
+    centerText(status_win, 1, wmessage, PAIR_ERROR);
+    wrefresh(status_win);
+    wgetch(status_win);
+}
+
+void TUI::showStatus(const std::string& message) {
+    wclear(status_win);
+    box(status_win, 0, 0);
+    std::wstring wmessage = std::wstring(message.begin(), message.end());
+    centerText(status_win, 1, wmessage, PAIR_DEFAULT);
+    wrefresh(status_win);
+    wgetch(status_win);
+}
+
+// ... (rest of the implementation remains the same) ???????????????
