@@ -5,7 +5,7 @@
 
 // Экспортирует пароли в JSON-файл через mmap
 // TODO: Добавить шифрование JSON с использованием master_key
-void ImportExport::exportPasswords(const std::string& buffer_file, const std::vector<PasswordEntry>& entries) {
+void ImportExport::exportPasswords(const std::string &buffer_file, const std::vector<PasswordEntry> &entries) {
     Json::Value root(Json::arrayValue);
     for (const auto& entry : entries) {
         Json::Value item;

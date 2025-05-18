@@ -2,6 +2,8 @@
 #define TUI_H
 
 #include <ncurses.h>
+#include <ncursesw/ncurses.h>
+#include <ncurses/ncurses.h>
 #include <string>
 #include <vector>
 #include "../h/database.h"
@@ -12,13 +14,13 @@
 
 class TUI {
 public:
-    TUI(const std::string& db_path, const std::string& key_file, const std::string& cache_file);
+    TUI(const std::string& db_path, std::string  key_file, const std::string& cache_file);
     ~TUI();
     void run();
 
 private:
     Database* db;
-    Crypto* crypto;
+    Crypto* crypto{};
     std::string key_file;
     std::string cache_file;
     int current_user_id;
@@ -51,24 +53,24 @@ private:
     void handleViewPasswords();
     void handleGeneratePassword();
     void handleImportExport();
-    void showError(const std::string& message);
-    void showStatus(const std::string& message);
-    void showSuccess(const std::string& message);
+    void showError(const std::string& message) const;
+    void showStatus(const std::string& message) const;
+    void showSuccess(const std::string& message) const;
 
     // Centered text utilities
-    void centerText(WINDOW* win, int y, const std::wstring& text, int pair = PAIR_DEFAULT);
-    void centerText(WINDOW* win, int y, const std::string& text, int pair = PAIR_DEFAULT);
+    static void centerText(WINDOW* win, int y, const std::wstring& text, int pair = PAIR_DEFAULT);
+    static void centerText(WINDOW* win, int y, const std::string& text, int pair = PAIR_DEFAULT);
 
     // Input handling
-    std::string getInput(const std::string& prompt);
+    std::string getInput(const std::string& prompt, bool echo_input);
     int getValidNumber(int min, int max, const std::string& prompt);
-    bool confirmAction(const std::string& prompt);
+    bool confirmAction(const std::string& prompt) const;
     bool confirmActionW(const std::wstring& prompt);
 
     // Utility
     void clearInputWindow();
     void refreshWindows();
-    void initColors();
+    static void initColors();
 };
 
 #endif // TUI_H

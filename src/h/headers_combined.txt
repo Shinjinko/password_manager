@@ -1,0 +1,506 @@
+
+=== crypto.h ===
+
+#ifndef CRYPTO_H
+#define CRYPTO_H
+
+#include <string>
+
+class Crypto {
+public:
+    Crypto(const std::string& password, const std::string& key_file = "master_key.bin");
+    ~Crypto();
+    std::string encrypt(const std::string& data);
+    std::string decrypt(const std::string& data);
+    std::string hashPassword(const std::string& password);
+private:
+    std::string master_key; // Мастер-ключ для AES-256-GCM
+};
+
+#endif // CRYPTO_H
+=== database.h ===
+
+#ifndef DATABASE_H
+#define DATABASE_H
+
+#include <string>
+#include <vector>
+#include <sqlite3.h>
+
+struct PasswordEntry {
+    std::string description;
+    std::string login;
+    std::string password; // Зашифрованный пароль (AES-256-GCM)
+};
+
+class Database {
+private:
+    std::string db_path;
+    sqlite3* db;
+
+public:
+    Database(const std::string& path);
+    ~Database();
+
+    // Инициализация таблиц
+    bool initialize();
+
+    // Регистрация пользователя
+    bool registerUser(const std::string& username, const std::string& password_hash, const std::string& totp_secret);
+
+    // Аутентификация пользователя
+    bool authenticateUser(const std::string& username, const std::string& password_hash, int& user_id, std::string& totp_secret);
+
+    // CRUD для паролей
+    bool addPassword(int user_id, const PasswordEntry& entry);
+    bool removePassword(int user_id, const std::string& description);
+    bool getPasswords(int user_id, std::vector<PasswordEntry>& entries);
+};
+
+#endif // DATABASE_H
+=== exceptions.h ===
+
+#ifndef EXCEPTIONS_H
+#define EXCEPTIONS_H
+
+#include <string>
+
+namespace Exceptions {
+    // Получает корректное число в заданном диапазоне
+    int getValidNumber(int min, int max, const std::string& prompt = "Выберите действие: ");
+}
+
+#endif // EXCEPTIONS_H
+=== import_export.h ===
+
+#ifndef IMPORT_EXPORT_H
+#define IMPORT_EXPORT_H
+
+#include <string>
+#include <vector>
+#include "../h/database.h"
+
+class ImportExport {
+public:
+    static void exportPasswords(const std::string& buffer_file, const std::vector<PasswordEntry>& entries);
+    static std::vector<PasswordEntry> importPasswords(const std::string& buffer_file);
+};
+
+#endif // IMPORT_EXPORT_H
+=== menu.h ===
+
+#ifndef MENU_H
+#define MENU_H
+
+#include "database.h"
+
+class Menu {
+public:
+    Menu(const std::string& db_path, const std::string& master_password);
+    void run();
+
+private:
+    Database db;
+};
+
+#endif
+=== mmap_utils.h ===
+
+#ifndef MMAP_UTILS_H
+#define MMAP_UTILS_H
+
+#include <string>
+#include <vector>
+
+struct TOTPCacheEntry {
+    int user_id;
+    char code[7]; // 6 цифр + '\0'
+    time_t timestamp;
+};
+
+class MMAPUtils {
+public:
+    // Кэш TOTP-кодов
+    static void initTOTPCache(const std::string& cache_file, size_t max_entries);
+    static bool addTOTPCacheEntry(const std::string& cache_file, int user_id, const std::string& code);
+    static bool isCodeInCache(const std::string& cache_file, int user_id, const std::string& code);
+    static void cleanupTOTPCache(const std::string& cache_file);
+
+    // Буфер импорта/экспорта
+    static void writeImportExportBuffer(const std::string& buffer_file, const std::string& data);
+    static std::string readImportExportBuffer(const std::string& buffer_file);
+
+    // Мастер-ключ
+    static void storeMasterKey(const std::string& key_file, const std::string& key, const std::string& encryption_key);
+    static std::string loadMasterKey(const std::string& key_file, const std::string& encryption_key);
+};
+
+#endif // MMAP_UTILS_H
+=== pass_gen.h ===
+
+#ifndef PASS_GEN_H
+#define PASS_GEN_H
+
+#include <string>
+
+std::string generatePassword(int length, bool useLower, bool useUpper, bool useDigits, bool useSymbols);
+
+#endif // PASS_GEN_H
+
+=== totp.h ===
+
+#ifndef TOTP_H
+#define TOTP_H
+
+#include <string>
+
+class TOTP {
+public:
+    // Генерирует base32-закодированный секрет
+    static std::string generateSecret();
+    // Генерирует TOTP-код на основе секрета и текущего времени
+    static std::string generateCode(const std::string& secret);
+    // Проверяет TOTP-код
+    static bool verifyCode(const std::string& secret, const std::string& code);
+};
+
+#endif // TOTP_H
+=== tui.h ===
+
+#ifndef TUI_H
+#define TUI_H
+
+#include <ncurses.h>
+#include <string>
+#include <vector>
+#include "../h/database.h"
+#include "../h/crypto.h"
+#include "../h/totp.h"
+#include "../h/pass_gen.h"
+#include "../h/import_export.h"
+
+class TUI {
+public:
+    TUI(const std::string& db_path, const std::string& key_file, const std::string& cache_file);
+    ~TUI();
+    void run();
+
+private:
+    Database* db;
+    Crypto* crypto;
+    std::string key_file;
+    std::string cache_file;
+    int current_user_id;
+    std::string current_username;
+    bool is_authenticated;
+
+    // Window management
+    WINDOW* main_win;
+    WINDOW* input_win;
+    WINDOW* status_win;
+
+    // Color pairs
+    enum ColorPairs {
+        PAIR_DEFAULT = 1,
+        PAIR_TITLE,
+        PAIR_MENU,
+        PAIR_SUCCESS,
+        PAIR_ERROR,
+        PAIR_WARNING,
+        PAIR_HIGHLIGHT
+    };
+
+    // Menu navigation
+    void showMainMenu();
+    void showAuthenticatedMenu();
+    void handleRegister();
+    void handleLogin();
+    void handleAddPassword();
+    void handleRemovePassword();
+    void handleViewPasswords();
+    void handleGeneratePassword();
+    void handleImportExport();
+    void showError(const std::string& message);
+    void showStatus(const std::string& message);
+    void showSuccess(const std::string& message);
+
+    // Centered text utilities
+    void centerText(WINDOW* win, int y, const std::wstring& text, int pair = PAIR_DEFAULT);
+    void centerText(WINDOW* win, int y, const std::string& text, int pair = PAIR_DEFAULT);
+
+    // Input handling
+    std::string getInput(const std::string& prompt);
+    int getValidNumber(int min, int max, const std::string& prompt);
+    bool confirmAction(const std::string& prompt);
+    bool confirmActionW(const std::wstring& prompt);
+
+    // Utility
+    void clearInputWindow();
+    void refreshWindows();
+    void initColors();
+};
+
+#endif // TUI_H
+=== crypto.h ===
+
+#ifndef CRYPTO_H
+#define CRYPTO_H
+
+#include <string>
+#include <openssl/evp.h>
+#include <openssl/rand.h>
+
+// Class for handling cryptographic operations
+class Crypto {
+private:
+    std::string master_key; // Master key for encryption
+    std::string key_file;   // Path to the key file
+    EVP_CIPHER_CTX* ctx;    // OpenSSL encryption context
+
+    // Initialize the OpenSSL cipher context
+    void initializeContext();
+    // Load existing master key or generate a new one
+    void loadOrGenerateMasterKey(const std::string& password);
+
+public:
+    // Constructor: initialize with user password and key file path
+    Crypto(const std::string& password, const std::string& key_file);
+    // Destructor: clean up OpenSSL context
+    ~Crypto();
+
+    // Static method to hash a password using SHA-256
+    static std::string hashPassword(const std::string& password);
+    // Encrypt plaintext using AES-256-GCM
+    std::string encrypt(const std::string& plaintext);
+    // Decrypt ciphertext using AES-256-GCM
+    std::string decrypt(const std::string& ciphertext);
+};
+
+#endif // CRYPTO_H
+=== database.h ===
+
+#ifndef DATABASE_H
+#define DATABASE_H
+
+#include <string>
+#include <vector>
+#include <sqlite3.h>
+
+struct PasswordEntry {
+    std::string description;
+    std::string login;
+    std::string password; // Зашифрованный пароль (AES-256-GCM)
+};
+
+class Database {
+private:
+    std::string db_path;
+    sqlite3* db;
+
+public:
+    Database(const std::string& path);
+    ~Database();
+
+    // Инициализация таблиц
+    bool initialize();
+
+    // Регистрация пользователя
+    bool registerUser(const std::string& username, const std::string& password_hash, const std::string& totp_secret);
+
+    // Аутентификация пользователя
+    bool authenticateUser(const std::string& username, const std::string& password_hash, int& user_id, std::string& totp_secret);
+
+    // CRUD для паролей
+    bool addPassword(int user_id, const PasswordEntry& entry);
+    bool removePassword(int user_id, const std::string& description);
+    bool getPasswords(int user_id, std::vector<PasswordEntry>& entries);
+};
+
+#endif // DATABASE_H
+=== exceptions.h ===
+
+#ifndef EXCEPTIONS_H
+#define EXCEPTIONS_H
+
+#include <string>
+
+namespace Exceptions {
+    // Получает корректное число в заданном диапазоне
+    int getValidNumber(int min, int max, const std::string& prompt = "Выберите действие: ");
+}
+
+#endif // EXCEPTIONS_H
+=== import_export.h ===
+
+#ifndef IMPORT_EXPORT_H
+#define IMPORT_EXPORT_H
+
+#include <string>
+#include <vector>
+#include "../h/database.h"
+#include "crypto.h"
+
+class ImportExport {
+public:
+    static void
+    exportPasswords(const std::string &buffer_file, const std::vector<PasswordEntry> &entries);
+    static std::vector<PasswordEntry> importPasswords(const std::string& buffer_file);
+};
+
+#endif // IMPORT_EXPORT_H
+=== menu.h ===
+
+#ifndef MENU_H
+#define MENU_H
+
+#include "database.h"
+
+class Menu {
+public:
+    Menu(const std::string& db_path, const std::string& master_password);
+    void run();
+
+private:
+    Database db;
+};
+
+#endif
+=== mmap_utils.h ===
+
+#ifndef MMAP_UTILS_H
+#define MMAP_UTILS_H
+
+#include <string>
+#include <vector>
+
+struct TOTPCacheEntry {
+    int user_id;
+    char code[7]; // 6 цифр + '\0'
+    time_t timestamp;
+};
+
+class MMAPUtils {
+public:
+    // Кэш TOTP-кодов
+    static void initTOTPCache(const std::string& cache_file, size_t max_entries);
+    static bool addTOTPCacheEntry(const std::string& cache_file, int user_id, const std::string& code);
+    static bool isCodeInCache(const std::string& cache_file, int user_id, const std::string& code);
+    static void cleanupTOTPCache(const std::string& cache_file);
+
+    // Буфер импорта/экспорта
+    static void writeImportExportBuffer(const std::string& buffer_file, const std::string& data);
+    static std::string readImportExportBuffer(const std::string& buffer_file);
+
+    // Мастер-ключ
+    static void storeMasterKey(const std::string& key_file, const std::string& key, const std::string& encryption_key);
+    static std::string loadMasterKey(const std::string& key_file, const std::string& encryption_key);
+};
+
+#endif // MMAP_UTILS_H
+=== pass_gen.h ===
+
+#ifndef PASS_GEN_H
+#define PASS_GEN_H
+
+#include <string>
+
+std::string generatePassword(int length, bool useLower, bool useUpper, bool useDigits, bool useSymbols);
+
+#endif // PASS_GEN_H
+
+=== totp.h ===
+
+#ifndef TOTP_H
+#define TOTP_H
+
+#include <string>
+
+class TOTP {
+public:
+    // Генерирует base32-закодированный секрет
+    static std::string generateSecret();
+    // Генерирует TOTP-код на основе секрета и текущего времени
+    static std::string generateCode(const std::string& secret);
+    // Проверяет TOTP-код
+    static bool verifyCode(const std::string& secret, const std::string& code);
+};
+
+#endif // TOTP_H
+=== tui.h ===
+
+#ifndef TUI_H
+#define TUI_H
+
+#include <ncurses.h>
+#include <ncursesw/ncurses.h>
+#include <ncurses/ncurses.h>
+#include <string>
+#include <vector>
+#include "../h/database.h"
+#include "../h/crypto.h"
+#include "../h/totp.h"
+#include "../h/pass_gen.h"
+#include "../h/import_export.h"
+
+class TUI {
+public:
+    TUI(const std::string& db_path, std::string  key_file, const std::string& cache_file);
+    ~TUI();
+    void run();
+
+private:
+    Database* db;
+    Crypto* crypto{};
+    std::string key_file;
+    std::string cache_file;
+    int current_user_id;
+    std::string current_username;
+    bool is_authenticated;
+
+    // Window management
+    WINDOW* main_win;
+    WINDOW* input_win;
+    WINDOW* status_win;
+
+    // Color pairs
+    enum ColorPairs {
+        PAIR_DEFAULT = 1,
+        PAIR_TITLE,
+        PAIR_MENU,
+        PAIR_SUCCESS,
+        PAIR_ERROR,
+        PAIR_WARNING,
+        PAIR_HIGHLIGHT
+    };
+
+    // Menu navigation
+    void showMainMenu();
+    void showAuthenticatedMenu();
+    void handleRegister();
+    void handleLogin();
+    void handleAddPassword();
+    void handleRemovePassword();
+    void handleViewPasswords();
+    void handleGeneratePassword();
+    void handleImportExport();
+    void showError(const std::string& message) const;
+    void showStatus(const std::string& message) const;
+    void showSuccess(const std::string& message) const;
+
+    // Centered text utilities
+    static void centerText(WINDOW* win, int y, const std::wstring& text, int pair = PAIR_DEFAULT);
+    static void centerText(WINDOW* win, int y, const std::string& text, int pair = PAIR_DEFAULT);
+
+    // Input handling
+    std::string getInput(const std::string& prompt, bool echo_input);
+    int getValidNumber(int min, int max, const std::string& prompt);
+    bool confirmAction(const std::string& prompt) const;
+    bool confirmActionW(const std::wstring& prompt);
+
+    // Utility
+    void clearInputWindow();
+    void refreshWindows();
+    static void initColors();
+};
+
+#endif // TUI_H
