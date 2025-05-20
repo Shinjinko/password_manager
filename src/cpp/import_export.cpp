@@ -3,15 +3,13 @@
 #include <json/json.h>
 #include <stdexcept>
 
-// Экспортирует пароли в JSON-файл через mmap
-// TODO: Добавить шифрование JSON с использованием master_key
 void ImportExport::exportPasswords(const std::string &buffer_file, const std::vector<PasswordEntry> &entries) {
     Json::Value root(Json::arrayValue);
     for (const auto& entry : entries) {
         Json::Value item;
         item["description"] = entry.description;
         item["login"] = entry.login;
-        item["password"] = entry.password; // Пароль уже расшифрован
+        item["password"] = entry.password;
         root.append(item);
     }
 
@@ -20,8 +18,6 @@ void ImportExport::exportPasswords(const std::string &buffer_file, const std::ve
     MMAPUtils::writeImportExportBuffer(buffer_file, json_data);
 }
 
-// Импортирует пароли из JSON-файла через mmap
-// TODO: Добавить расшифровку JSON с использованием master_key
 std::vector<PasswordEntry> ImportExport::importPasswords(const std::string& buffer_file) {
     std::string json_data = MMAPUtils::readImportExportBuffer(buffer_file);
     Json::Value root;

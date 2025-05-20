@@ -7,6 +7,7 @@
 
 // Class for handling cryptographic operations
 class Crypto {
+
 private:
     std::string master_key; // Master key for encryption
     std::string key_file;   // Path to the key file

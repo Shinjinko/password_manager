@@ -30,6 +30,8 @@ target_link_libraries(password_manager
     OpenSSL::Crypto
     SQLite::SQLite3
     ${CURSES_LIBRARIES}
+        cursesw
     jsoncpp
-    oath  # For liboath; may need manual linking if no find_package exists
+    oath
+    qrencode
 )

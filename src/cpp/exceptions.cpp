@@ -12,10 +12,10 @@ namespace Exceptions {
                     std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n'); // Очистка буфера
                     return number;
                 } else {
-                    std::cout << "Ошибка: введите число от " << min << " до " << max << "!" << std::endl;
+                    std::cout << "Error: enter the number from " << min << " to " << max << "!" << std::endl;
                 }
             } else {
-                std::cout << "Ошибка: введите число!" << std::endl;
+                std::cout << "Error: enter the number!" << std::endl;
                 std::cin.clear();
                 std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
             }

@@ -4,7 +4,7 @@
 Database::Database(const std::string& path) : db_path(path), db(nullptr) {
     int rc = sqlite3_open(db_path.c_str(), &db);
     if (rc != SQLITE_OK) {
-        std::cerr << "Ошибка открытия базы данных: " << sqlite3_errmsg(db) << std::endl;
+        std::cerr << "Database opening error: " << sqlite3_errmsg(db) << std::endl;
         sqlite3_close(db);
         db = nullptr;
     }
@@ -38,14 +38,14 @@ bool Database::initialize() {
     char* err_msg = nullptr;
     int rc = sqlite3_exec(db, create_users_sql, nullptr, nullptr, &err_msg);
     if (rc != SQLITE_OK) {
-        std::cerr << "Ошибка создания таблицы users: " << err_msg << std::endl;
+        std::cerr << "The error of creating a table users: " << err_msg << std::endl;
         sqlite3_free(err_msg);
         return false;
     }
 
     rc = sqlite3_exec(db, create_passwords_sql, nullptr, nullptr, &err_msg);
     if (rc != SQLITE_OK) {
-        std::cerr << "Ошибка создания таблицы passwords: " << err_msg << std::endl;
+        std::cerr << "The error of creating a table passwords: " << err_msg << std::endl;
         sqlite3_free(err_msg);
         return false;
     }
@@ -60,7 +60,7 @@ bool Database::registerUser(const std::string& username, const std::string& pass
     sqlite3_stmt* stmt;
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        std::cerr << "Ошибка подготовки запроса: " << sqlite3_errmsg(db) << std::endl;
+        std::cerr << "Request error: " << sqlite3_errmsg(db) << std::endl;
         return false;
     }
 
@@ -71,7 +71,7 @@ bool Database::registerUser(const std::string& username, const std::string& pass
     rc = sqlite3_step(stmt);
     bool success = (rc == SQLITE_DONE);
     if (!success) {
-        std::cerr << "Ошибка регистрации: " << sqlite3_errmsg(db) << std::endl;
+        std::cerr << "Registration error: " << sqlite3_errmsg(db) << std::endl;
     }
 
     sqlite3_finalize(stmt);
@@ -85,7 +85,7 @@ bool Database::authenticateUser(const std::string& username, const std::string& 
     sqlite3_stmt* stmt;
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        std::cerr << "Ошибка подготовки запроса: " << sqlite3_errmsg(db) << std::endl;
+        std::cerr << "Request error: " << sqlite3_errmsg(db) << std::endl;
         return false;
     }
 
@@ -111,7 +111,7 @@ bool Database::addPassword(int user_id, const PasswordEntry& entry) {
     sqlite3_stmt* stmt;
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        std::cerr << "Ошибка подготовки запроса: " << sqlite3_errmsg(db) << std::endl;
+        std::cerr << "Request error: " << sqlite3_errmsg(db) << std::endl;
         return false;
     }
 
@@ -123,7 +123,7 @@ bool Database::addPassword(int user_id, const PasswordEntry& entry) {
     rc = sqlite3_step(stmt);
     bool success = (rc == SQLITE_DONE);
     if (!success) {
-        std::cerr << "Ошибка добавления записи: " << sqlite3_errmsg(db) << std::endl;
+        std::cerr << "An error of adding a record: " << sqlite3_errmsg(db) << std::endl;
     }
 
     sqlite3_finalize(stmt);
@@ -137,7 +137,7 @@ bool Database::removePassword(int user_id, const std::string& description) {
     sqlite3_stmt* stmt;
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        std::cerr << "Ошибка подготовки запроса: " << sqlite3_errmsg(db) << std::endl;
+        std::cerr << "Request error: " << sqlite3_errmsg(db) << std::endl;
         return false;
     }
 
@@ -147,7 +147,7 @@ bool Database::removePassword(int user_id, const std::string& description) {
     rc = sqlite3_step(stmt);
     bool success = (rc == SQLITE_DONE && sqlite3_changes(db) > 0);
     if (!success && sqlite3_changes(db) == 0) {
-        std::cerr << "Запись не найдена!" << std::endl;
+        std::cerr << "The record is not found!" << std::endl;
     }
 
     sqlite3_finalize(stmt);
@@ -162,7 +162,7 @@ bool Database::getPasswords(int user_id, std::vector<PasswordEntry>& entries) {
     sqlite3_stmt* stmt;
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        std::cerr << "Ошибка подготовки запроса: " << sqlite3_errmsg(db) << std::endl;
+        std::cerr << "Request error: " << sqlite3_errmsg(db) << std::endl;
         return false;
     }
 
